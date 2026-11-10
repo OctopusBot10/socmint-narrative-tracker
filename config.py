@@ -16,10 +16,19 @@ RESULTS_DIR = ROOT_DIR / "results"
 DEFAULT_USER_AGENT = (
     "socmint-prototype/0.1 (research assessment; public posts only)"
 )
-REDDIT_MIN_INTERVAL_SECONDS = 1.1
+TELEGRAM_MIN_INTERVAL_SECONDS = 1.1
 REQUEST_TIMEOUT_SECONDS = 25
-MAX_REDDIT_PAGES = 4
-MAX_YOUTUBE_RESULTS = 50
+MAX_TELEGRAM_PAGES = 4
+MAX_PUBLIC_CHANNELS = 20
+
+PLATFORM_ORDER = ("telegram", "twitter", "youtube", "facebook")
+PLATFORM_LABELS = {
+    "telegram": "Telegram",
+    "twitter": "Twitter (X)",
+    "youtube": "YouTube",
+    "facebook": "Facebook HTML",
+}
+DEFAULT_HANDLES = {"telegram": "acme_notice", "twitter": "acme_notice"}
 
 
 def load_env_file(path: Path = ENV_PATH) -> None:

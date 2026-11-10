@@ -1,12 +1,15 @@
 """Flag public posting patterns that can indicate coordinated amplification.
 
-Two indicators are implemented:
+Two indicators are implemented, and each alert lists every reason that applies:
 
 1. Near-duplicate burst. Different authors post identical or near-identical
-   text inside a short time window. A group that also spans Reddit and YouTube
-   is marked as cross-platform amplification.
+   text inside a short time window. A span of 15 minutes or less adds
+   "posting within minutes of each other".
 2. Shared-link burst. Different authors post the same outbound URL inside the
    window, even when the surrounding words differ.
+3. Reused profile photos, accounts created within 48 hours, and accounts that
+   reply to, repost, or quote one another. These fire only when the collected
+   metadata contains the signal.
 
 Usernames that show up in more than one alert are listed as repeat presence.
 That is a count, not an identity finding.
@@ -144,10 +147,17 @@ def detect_coordination(
                     ),
                     "span_hours": round(span_hours, 2),
                 },
+                reasons=_reasons_for(
+                    [posts[index] for index in members],
+                    ["posting the same or near-identical text"],
+                ),
             )
         )
 
     alerts.extend(_shared_link_alerts(posts, times, window_seconds, used_ids))
+    alerts.extend(_profile_photo_alerts(posts, alerts))
+    alerts.extend(_account_cohort_alerts(posts, alerts))
+    alerts.extend(_amplification_alerts(posts, alerts))
     alerts.sort(key=lambda alert: ({"high": 0, "medium": 1, "low": 2}[alert["severity"]], -alert["score"]))
     for index, alert in enumerate(alerts, start=1):
         alert["alert_id"] = f"A{index}"
@@ -236,6 +246,10 @@ def _shared_link_alerts(
                     f"within {span_hours:.1f} hours."
                 ),
                 extra={"shared_url": url, "span_hours": round(span_hours, 2)},
+                reasons=_reasons_for(
+                    [posts[index] for index in chosen],
+                    ["posting the same outbound link"],
+                ),
             )
         )
     return alerts
@@ -249,6 +263,7 @@ def _alert(
     posts: list[Post],
     summary: str,
     extra: dict,
+    reasons: list[str],
 ) -> dict:
     ordered = sorted(posts, key=lambda post: post.created_at)
     return {
@@ -257,6 +272,7 @@ def _alert(
         "severity": severity,
         "score": round(score, 3),
         "summary": summary,
+        "reasons": reasons,
         "authors": sorted({post.author for post in ordered}),
         "platforms": sorted({post.platform for post in ordered}),
         "post_ids": [post.post_id for post in ordered],
@@ -276,6 +292,218 @@ def _alert(
             for post in ordered
         ],
     }
+
+
+def _reasons_for(posts: list[Post], base: list[str]) -> list[str]:
+    reasons = list(base)
+    if len(posts) >= 2 and _within_minutes(posts):
+        reasons.append("posting within minutes of each other")
+    if _created_together(posts):
+        reasons.append("accounts created around the same time")
+    if _shared_profile(posts):
+        reasons.append("reused profile photos")
+    if _amplifies_inside(posts):
+        reasons.append("the same accounts amplifying each other")
+    return reasons
+
+
+def _within_minutes(posts: list[Post]) -> bool:
+    ordered = sorted(posts, key=lambda post: _as_utc(post.created_at))
+    for left_index, left in enumerate(ordered):
+        for right in ordered[left_index + 1 :]:
+            delta = (_as_utc(right.created_at) - _as_utc(left.created_at)).total_seconds()
+            if delta > 15 * 60:
+                break
+            if left.author.strip().lower() != right.author.strip().lower():
+                return True
+    return False
+
+
+def _created_together(posts: list[Post]) -> bool:
+    dated = [
+        post
+        for post in posts
+        if post.account_created is not None and not _is_anonymous(post.author)
+    ]
+    for left_index, left in enumerate(dated):
+        for right in dated[left_index + 1 :]:
+            if left.author.strip().lower() == right.author.strip().lower():
+                continue
+            gap = abs(
+                (_as_utc(left.account_created) - _as_utc(right.account_created)).total_seconds()
+            )
+            if gap <= 48 * 3600:
+                return True
+    return False
+
+
+def _profile_key(url: str) -> str:
+    text = url.split("?")[0].strip().lower()
+    text = re.sub(r"_(normal|bigger|mini|200x200|400x400)(?=\.)", "", text)
+    if not text.startswith("http"):
+        return ""
+    if text.endswith("default_profile_images/default_profile.png"):
+        return ""
+    return text
+
+
+def _shared_profile(posts: list[Post]) -> bool:
+    owners: dict[str, set[str]] = {}
+    for post in posts:
+        key = _profile_key(post.profile_image)
+        if not key or _is_anonymous(post.author):
+            continue
+        owners.setdefault(key, set()).add(post.author.strip().lower())
+    return any(len(names) >= 2 for names in owners.values())
+
+
+def _amplifies_inside(posts: list[Post]) -> bool:
+    present = {post.author.strip().lower() for post in posts if not _is_anonymous(post.author)}
+    for post in posts:
+        for name in post.amplified_authors:
+            if name.strip().lower() in present and name.strip().lower() != post.author.strip().lower():
+                return True
+    return False
+
+
+def _covered(authors: set[str], alerts: list[dict]) -> bool:
+    for alert in alerts:
+        existing = {author.strip().lower() for author in alert.get("authors", [])}
+        if authors <= existing:
+            return True
+    return False
+
+
+def _profile_photo_alerts(posts: list[Post], existing: list[dict]) -> list[dict]:
+    groups: dict[str, list[Post]] = {}
+    for post in posts:
+        key = _profile_key(post.profile_image)
+        if key and not _is_anonymous(post.author):
+            groups.setdefault(key, []).append(post)
+    alerts: list[dict] = []
+    for members in groups.values():
+        authors = {post.author.strip().lower() for post in members}
+        if len(authors) < 2 or _covered(authors, existing):
+            continue
+        chosen = []
+        seen: set[str] = set()
+        for post in sorted(members, key=lambda item: item.created_at):
+            key = post.author.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            chosen.append(post)
+        alerts.append(
+            _alert(
+                indicator="reused_profile_photo",
+                severity="medium",
+                score=0.62,
+                posts=chosen,
+                summary=(
+                    f"{len(chosen)} accounts used the same profile photo in this sample."
+                ),
+                extra={"profile_image": chosen[0].profile_image},
+                reasons=["reused profile photos"],
+            )
+        )
+    return alerts
+
+
+def _account_cohort_alerts(posts: list[Post], existing: list[dict]) -> list[dict]:
+    dated = [
+        post
+        for post in posts
+        if post.account_created is not None and not _is_anonymous(post.author)
+    ]
+    dated.sort(key=lambda post: _as_utc(post.account_created))
+    alerts: list[dict] = []
+    index = 0
+    while index < len(dated):
+        window = [dated[index]]
+        names = {dated[index].author.strip().lower()}
+        cursor = index + 1
+        while cursor < len(dated):
+            gap = (
+                _as_utc(dated[cursor].account_created) - _as_utc(window[0].account_created)
+            ).total_seconds()
+            if gap > 48 * 3600:
+                break
+            name = dated[cursor].author.strip().lower()
+            if name not in names:
+                names.add(name)
+                window.append(dated[cursor])
+            cursor += 1
+        if len(names) >= 2 and not _covered(names, existing):
+            alerts.append(
+                _alert(
+                    indicator="account_creation_cohort",
+                    severity="low",
+                    score=0.45,
+                    posts=window,
+                    summary=(
+                        f"{len(window)} accounts in this sample were created within 48 hours of each other."
+                    ),
+                    extra={
+                        "account_created_start": utc_account(window[0]),
+                        "account_created_end": utc_account(window[-1]),
+                    },
+                    reasons=["accounts created around the same time"],
+                )
+            )
+            index = cursor
+        else:
+            index += 1
+    return alerts
+
+
+def utc_account(post: Post) -> str:
+    if post.account_created is None:
+        return ""
+    return _as_utc(post.account_created).isoformat()
+
+
+def _amplification_alerts(posts: list[Post], existing: list[dict]) -> list[dict]:
+    by_author: dict[str, list[Post]] = {}
+    for post in posts:
+        if _is_anonymous(post.author):
+            continue
+        by_author.setdefault(post.author.strip().lower(), []).append(post)
+    parent = {author: author for author in by_author}
+
+    def find(author: str) -> str:
+        while parent[author] != author:
+            parent[author] = parent[parent[author]]
+            author = parent[author]
+        return author
+
+    for author, authored in by_author.items():
+        for post in authored:
+            for name in post.amplified_authors:
+                other = name.strip().lower()
+                if other in by_author and other != author:
+                    parent[find(other)] = find(author)
+    groups: dict[str, list[str]] = {}
+    for author in by_author:
+        groups.setdefault(find(author), []).append(author)
+    alerts: list[dict] = []
+    for members in groups.values():
+        if len(members) < 2 or _covered(set(members), existing):
+            continue
+        chosen = [by_author[author][0] for author in members]
+        alerts.append(
+            _alert(
+                indicator="mutual_amplification",
+                severity="medium",
+                score=0.58,
+                posts=chosen,
+                summary=(
+                    f"{len(chosen)} accounts in this sample reply to, repost, or quote one another."
+                ),
+                extra={},
+                reasons=["the same accounts amplifying each other"],
+            )
+        )
+    return alerts
 
 
 def _near_duplicate_summary(

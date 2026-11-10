@@ -26,9 +26,20 @@ class Post:
     created_at: datetime
     media_links: list[str] = field(default_factory=list)
     outbound_urls: list[str] = field(default_factory=list)
+    photos: list[str] = field(default_factory=list)
+    videos: list[str] = field(default_factory=list)
     ups: int | None = None
     views: int | None = None
+    likes: int | None = None
+    retweets: int | None = None
+    replies: int | None = None
     comments: int | None = None
+    account_created: datetime | None = None
+    profile_image: str = ""
+    amplified_authors: list[str] = field(default_factory=list)
+    authenticity_score: int | None = None
+    bot_risk_pct: int | None = None
+    risk_flags: list[str] = field(default_factory=list)
     is_demo: bool = False
 
     def full_text(self) -> str:
@@ -41,6 +52,9 @@ class Post:
     def to_dict(self) -> dict:
         payload = asdict(self)
         payload["created_at"] = utc_iso(self.created_at)
+        payload["account_created"] = (
+            utc_iso(self.account_created) if self.account_created else ""
+        )
         payload["text_preview"] = self.full_text()[:280]
         return payload
 
@@ -53,6 +67,7 @@ class NarrativeCluster:
     label: str
     top_terms: list[str]
     posts: list[Post]
+    claim_score: float | None = None
 
     @property
     def size(self) -> int:
@@ -86,6 +101,7 @@ class NarrativeCluster:
             "label": self.label,
             "top_terms": self.top_terms,
             "size": self.size,
+            "claim_score": self.claim_score,
             "platforms": self.platform_counts(),
             "post_ids": [post.post_id for post in self.sorted_posts()],
             "patient_zero": {

@@ -110,6 +110,7 @@ def alerts_csv(payload: dict) -> str:
                 "authors": ", ".join(alert.get("authors", [])),
                 "platforms": ", ".join(alert.get("platforms", [])),
                 "post_ids": ", ".join(alert.get("post_ids", [])),
+                "reasons": "; ".join(alert.get("reasons", [])),
                 "time_start": alert.get("time_start"),
                 "time_end": alert.get("time_end"),
                 "evidence": json.dumps(alert.get("evidence", {})),
@@ -117,6 +118,95 @@ def alerts_csv(payload: dict) -> str:
             }
         )
     return _frame_csv(pd.DataFrame(rows))
+
+
+def payload_to_html(payload: dict) -> str:
+    """A single HTML report of posts, narratives, origins, and account groups."""
+    query = payload.get("query", {})
+    summary = payload.get("summary", {})
+    parts = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+        "<title>SOCMINT results</title>",
+        "<style>body{font-family:Georgia,serif;max-width:920px;margin:2rem auto;padding:0 1rem;color:#1c1917}",
+        "h1,h2{font-family:system-ui,sans-serif} article,section{border-top:1px solid #e7e5e4;padding:1rem 0}",
+        "img{max-width:280px;display:block;margin:.4rem 0} .reason{display:inline-block;background:#f5f5f4;border-radius:999px;padding:.15rem .6rem;margin:.15rem .3rem .15rem 0}",
+        "</style></head><body>",
+        f"<h1>Results for {_esc(query.get('keyword', ''))}</h1>",
+        f"<p>{_esc(query.get('start', '')[:10])} to {_esc(query.get('end', '')[:10])} UTC · "
+        f"{_esc(query.get('mode', ''))} · platforms: {_esc(', '.join(query.get('platforms', [])))}</p>",
+        f"<p>{summary.get('posts', 0)} posts · {summary.get('multi_post_clusters', 0)} multi-post narratives · "
+        f"{summary.get('alerts', 0)} account groups.</p>",
+        f"<p>{_esc(payload.get('disclaimer', ''))}</p>",
+        "<h2>Posts</h2>",
+    ]
+    for post in payload.get("posts", []):
+        parts.append("<article>")
+        parts.append(
+            f"<p><strong>{_esc(post.get('platform'))}</strong> · {_esc(post.get('author'))} · "
+            f"{_esc(str(post.get('created_at', ''))[:16])}</p>"
+        )
+        parts.append(f"<p>{_esc(post.get('text') or 'This post has no text.')}</p>")
+        parts.append(
+            f"<p>Likes {post.get('likes') or 0} · Retweets {post.get('retweets') or 0} · "
+            f"Replies {post.get('replies') or 0} · Views {post.get('views') or 0}</p>"
+        )
+        if post.get("url"):
+            parts.append(f"<p><a href='{_esc(post['url'])}'>Open post</a></p>")
+        for photo in (post.get("photos") or [])[:1]:
+            parts.append(f"<img src='{_esc(photo)}' alt='Post photo'>")
+        for video in (post.get("videos") or [])[:1]:
+            parts.append(f"<p><a href='{_esc(video)}'>Video</a></p>")
+        parts.append("</article>")
+    parts.append("<h2>Main narratives</h2>")
+    for cluster in payload.get("clusters", []):
+        if int(cluster.get("size") or 0) < 2:
+            continue
+        origin = cluster.get("patient_zero") or {}
+        parts.append("<section>")
+        parts.append(
+            f"<h3>{_esc(cluster.get('label'))}</h3>"
+            f"<p>{cluster.get('size')} posts · platforms {_esc(json.dumps(cluster.get('platforms', {})))}</p>"
+        )
+        parts.append(
+            f"<p>Started in this sample with {_esc(origin.get('author'))} on "
+            f"{_esc(origin.get('platform'))}: {_esc(origin.get('text') or '')}</p>"
+        )
+        if origin.get("url"):
+            parts.append(f"<p><a href='{_esc(origin['url'])}'>First post</a></p>")
+        parts.append("<p>Spread:</p><ol>")
+        for step in cluster.get("propagation") or []:
+            parts.append(
+                "<li>"
+                f"{_esc(step.get('platform'))} · {_esc(step.get('author'))} · "
+                f"{_esc(str(step.get('created_at', ''))[:16])} · "
+                f"<a href='{_esc(step.get('url') or '')}'>Open</a>"
+                "</li>"
+            )
+        parts.append("</ol></section>")
+    parts.append("<h2>Account groups</h2>")
+    alerts = payload.get("alerts") or []
+    if not alerts:
+        parts.append("<p>No account group met the current settings.</p>")
+    for alert in alerts:
+        parts.append("<section>")
+        parts.append(f"<h3>{_esc(alert.get('alert_id'))} · {_esc(alert.get('summary'))}</h3>")
+        for reason in alert.get("reasons") or []:
+            parts.append(f"<span class='reason'>{_esc(reason)}</span>")
+        parts.append(f"<p>Accounts: {_esc(', '.join(alert.get('authors', [])))}</p>")
+        parts.append(f"<p>{_esc(alert.get('limitation', ''))}</p>")
+        parts.append("</section>")
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+def _esc(value) -> str:
+    text = str(value or "")
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 def save_run(payload: dict, directory: Path = RESULTS_DIR) -> dict[str, str]:

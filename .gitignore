@@ -4,6 +4,8 @@ __pycache__/
 *.py[cod]
 .env
 .streamlit/secrets.toml
+service-account*.json
+credentials.json
 results/*.json
 results/*.csv
 .DS_Store

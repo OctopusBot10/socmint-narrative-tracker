@@ -1,11 +1,14 @@
-"""Synthetic posts so the dashboard can be demonstrated without API keys.
+"""Synthetic posts so the dashboard can be demonstrated without a network call.
 
-Every demo record is labeled `is_demo=True` and uses example.com URLs.
+Every demo record is labeled `is_demo=True`. Links use the public URL shape of
+the selected platform and the handle from the sidebar. They are constructed
+sequence ids, not pages that were fetched.
+
 The generator plants three reviewable patterns inside the selected dates:
 
-- a withdrawal rumor that starts on Reddit and is later repeated on YouTube
-- a tight near-copy burst of that rumor, including cross-platform copies
-- a shared-link burst and a copied market headline (a realistic false positive)
+- a withdrawal rumor on the Telegram handle
+- a tight near-copy burst of that rumor from other demo accounts
+- a shared Telegram link and a copied market headline (a realistic false positive)
 """
 
 from __future__ import annotations
@@ -14,18 +17,36 @@ import hashlib
 import random
 from datetime import datetime, timedelta
 
+from config import DEFAULT_HANDLES
 from models import Post
+from scrapers import normalize_handle, post_url
 
 
-def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Post]:
+def generate_demo_posts(
+    keyword: str,
+    start: datetime,
+    end: datetime,
+    *,
+    platforms: list[str] | None = None,
+    handles: dict[str, str] | None = None,
+) -> list[Post]:
     if end < start:
         start, end = end, start
     if end == start:
         end = start + timedelta(days=1)
 
+    del platforms
+    selected = ["telegram"]
+    resolved = {
+        "telegram": normalize_handle(
+            "telegram", (handles or {}).get("telegram") or DEFAULT_HANDLES["telegram"]
+        )
+    }
+
     seed = int(hashlib.sha256(keyword.encode("utf-8")).hexdigest()[:8], 16)
     rng = random.Random(seed)
     topic = keyword.strip() or "the topic"
+    counters = {"telegram": 12041}
 
     def at(fraction: float, minutes: int = 0) -> datetime:
         moment = start + (end - start) * fraction + timedelta(minutes=minutes)
@@ -35,13 +56,17 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
             return end
         return moment
 
+    def next_external_id(platform: str) -> str:
+        value = counters["telegram"]
+        counters["telegram"] += 1
+        return str(value)
+
     posts: list[Post] = []
 
     def add(
         *,
         platform: str,
         author: str,
-        community: str,
         title: str,
         text: str,
         when: datetime,
@@ -49,21 +74,22 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
         comments: int,
         views: int | None = None,
         outbound: list[str] | None = None,
-        media: list[str] | None = None,
     ) -> None:
-        serial = len(posts) + 1
-        post_id = f"demo-{platform}-{serial}"
+        if platform not in resolved:
+            return
+        external_id = next_external_id(platform)
+        handle = resolved[platform]
         posts.append(
             Post(
-                post_id=post_id,
+                post_id=f"demo-{platform}-{external_id}",
                 platform=platform,
                 author=author,
-                community=community,
+                community=handle,
                 title=title,
                 text=text,
-                url=f"https://example.com/demo/{platform}/{post_id}",
+                url=post_url(platform, handle, external_id),
                 created_at=when,
-                media_links=media or [],
+                media_links=[],
                 outbound_urls=outbound or [],
                 ups=ups,
                 views=views,
@@ -72,14 +98,18 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
             )
         )
 
+    def platform_at(index: int) -> str:
+        if "telegram" in resolved and index == 0:
+            return "telegram"
+        return selected[index % len(selected)]
+
     copy = (
         f"Multiple customers say {topic} will freeze withdrawals tomorrow morning. "
         "Move your money tonight and share this before it is deleted."
     )
     add(
-        platform="reddit",
+        platform=platform_at(0),
         author="demo_branch_note",
-        community="personalfinance",
         title=f"{topic} withdrawal freeze, please read",
         text=(
             f"Multiple customers say {topic} will freeze withdrawals tomorrow morning. "
@@ -88,14 +118,15 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
         when=at(0.34),
         ups=42,
         comments=11,
+        views=1800,
     )
-    reddit_authors = [
+    burst_authors = (
         "demo_save_now",
         "demo_cash_out",
         "demo_tell_friends",
         "demo_share_fast",
-    ]
-    for offset, author in enumerate(reddit_authors):
+    )
+    for offset, author in enumerate(burst_authors):
         variant = copy
         if offset == 1:
             variant = copy.replace("your money", "your funds")
@@ -106,27 +137,14 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
         elif offset == 3:
             variant = copy.replace("it is deleted", "it is removed")
         add(
-            platform="reddit",
+            platform=platform_at(offset + 1),
             author=author,
-            community="personalfinance",
             title=f"{topic} withdrawal freeze, please read",
             text=variant,
             when=at(0.36, minutes=20 * offset),
             ups=rng.randint(80, 240),
             comments=rng.randint(15, 60),
-        )
-    for offset, channel in enumerate(("Demo Desk North", "Demo Desk South")):
-        add(
-            platform="youtube",
-            author=channel,
-            community=channel,
-            title=f"{topic} withdrawal freeze, please read",
-            text=copy,
-            when=at(0.36, minutes=90 + 25 * offset),
-            ups=rng.randint(300, 900),
             views=rng.randint(4000, 18000),
-            comments=rng.randint(40, 160),
-            media=[f"https://example.com/demo/thumb-{offset + 1}.jpg"],
         )
 
     fee_template = (
@@ -148,14 +166,14 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
     ]
     for index, line in enumerate(fee_lines):
         add(
-            platform="reddit",
+            platform=selected[index % len(selected)],
             author=f"demo_fee_user_{index + 1}",
-            community="banking",
             title=f"{topic} monthly maintenance fee",
             text=line,
             when=at(0.12 + index * 0.14),
             ups=rng.randint(3, 40),
             comments=rng.randint(1, 12),
+            views=rng.randint(200, 2000),
         )
 
     outage_lines = [
@@ -182,14 +200,13 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
     ]
     for index, line in enumerate(outage_lines):
         add(
-            platform="reddit" if index < 4 else "youtube",
-            author=f"demo_app_user_{index + 1}" if index < 4 else "Demo Phone Help",
-            community="banking" if index < 4 else "Demo Phone Help",
+            platform=selected[index % len(selected)],
+            author=f"demo_app_user_{index + 1}",
             title=f"{topic} mobile app login error 5042",
             text=line,
             when=at(0.2 + index * 0.12),
             ups=rng.randint(5, 70),
-            views=1200 if index == 4 else None,
+            views=rng.randint(400, 5000),
             comments=rng.randint(2, 18),
         )
 
@@ -210,18 +227,17 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
     ]
     for index, line in enumerate(clarify_lines):
         add(
-            platform="reddit" if index < 3 else "youtube",
-            author=f"demo_check_source_{index + 1}" if index < 3 else "Demo Verify Desk",
-            community="personalfinance" if index < 3 else "Demo Verify Desk",
+            platform=selected[index % len(selected)],
+            author=f"demo_check_source_{index + 1}",
             title=f"Checking the circulating {topic} story",
             text=line,
             when=at(0.48 + index * 0.06),
             ups=rng.randint(20, 150),
-            views=8000 if index == 3 else None,
+            views=rng.randint(800, 8000),
             comments=rng.randint(4, 30),
         )
 
-    shared = "https://example.com/demo/forwarded-claim"
+    shared = f"https://t.me/{resolved['telegram']}/11990"
     link_lines = [
         (
             "Posting a screenshot that is circulating in a neighborhood group. "
@@ -241,9 +257,8 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
     ]
     for index, (line, title) in enumerate(link_lines):
         add(
-            platform="reddit",
+            platform=selected[index % len(selected)],
             author=f"demo_link_user_{index + 1}",
-            community="localnews",
             title=title,
             text=line,
             when=at(0.57, minutes=15 * index),
@@ -258,14 +273,14 @@ def generate_demo_posts(keyword: str, start: datetime, end: datetime) -> list[Po
     )
     for index, author in enumerate(("demo_wire_desk", "demo_wire_mirror")):
         add(
-            platform="reddit",
+            platform=selected[index % len(selected)],
             author=author,
-            community="stocks",
             title=f"{topic} equity price dips",
             text=wire,
             when=at(0.72, minutes=12 * index),
             ups=rng.randint(2, 20),
             comments=rng.randint(0, 4),
+            views=rng.randint(100, 900),
         )
 
     posts.sort(key=lambda post: post.created_at)
